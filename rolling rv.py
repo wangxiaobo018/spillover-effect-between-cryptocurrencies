@@ -54,7 +54,7 @@ data_ret['Ret'] = data_ret.groupby('id')['PRICE'].transform(calculate_returns)
 group_summary_ret = data_ret.groupby('id').size().reset_index(name='NumObservations')
 
 # List of cryptocurrency IDs to process
-crypto_ids = ["BTC", "000001.XSHG", "SH.000016","SH.000300","SZ.399001","SZ.399006"]
+crypto_ids = [ "000001.XSHG", "SH.000016","SH.000300","SZ.399001","SZ.399006"]
 
 # Initialize an empty DataFrame to store all RV values
 all_RV = pd.DataFrame()
@@ -89,7 +89,7 @@ for crypto_id in crypto_ids:
 all_RV = all_RV.sort_values(by='DT')
 all_RV= all_RV.copy()
 all_RV.columns = ["DT"] + crypto_ids  # 保持与 crypto_ids 一致
-all_RV.columns = ["DT", "BTC", "DASH", "ETH", "LTC", "XLM", "XRP"]
+all_RV.columns = ["DT", "BTC", "DASH", "ETH", "LTC", "XLM"]
 
 
 # Extract features and convert to numpy array
@@ -97,7 +97,7 @@ features = all_RV.drop(columns=['DT'])
 data = features.to_numpy()
 
 # Define the column names to match the renamed columns (excluding DT)
-columns = ["BTC", "DASH", "ETH", "LTC", "XLM", "XRP"]  # Use the desired names instead of crypto_ids
+columns = ["BTC", "DASH", "ETH", "LTC", "XLM"]  # Use the desired names instead of crypto_ids
 data_df = pd.DataFrame(data, columns=columns)
 
 # Update NPDC and RV column names
@@ -218,7 +218,7 @@ print(npdc_df)
 npdc = npdc_df.iloc[:, 1:-1]
 
 # Calculate which market spills over to BTC the most
-npdc_columns = ['NPDC_DASH_BTC', 'NPDC_ETH_BTC', 'NPDC_LTC_BTC', 'NPDC_XLM_BTC', 'NPDC_XRP_BTC']
+npdc_columns = ['NPDC_DASH_BTC', 'NPDC_ETH_BTC', 'NPDC_LTC_BTC', 'NPDC_XLM_BTC']
 max_spillover_to_btc = npdc_df[npdc_columns].apply(lambda x: x.idxmax() if x.max() > 0 else None, axis=1)
 max_spillover_to_btc_counts = max_spillover_to_btc.value_counts()
 
@@ -321,7 +321,7 @@ model1 = pd.DataFrame({
     'rv_lag1': data1_modified['RV'].shift(1),
     'rv_lag5': data1_modified['RV'].rolling(window=5).mean().shift(1),
     'rv_lag22': data1_modified['RV'].rolling(window=22).mean().shift(1),
-    'BTC_lag1': data1_modified['DASH'].shift(1)
+    'BTC_lag1': data1_modified['ETH'].shift(1)
 }).dropna()
 
 ''''

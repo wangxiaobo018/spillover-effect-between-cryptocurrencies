@@ -1,9 +1,5 @@
 import pandas as pd
 import numpy as np
-from pathlib import Path
-
-from scipy.stats import norm
-
 from scipy.stats import norm
 from scipy.special import gamma
 from scipy.optimize import differential_evolution, minimize
@@ -37,123 +33,114 @@ from scipy.stats import t, kendalltau, spearmanr
 from copulas.multivariate import GaussianMultivariate
 from copulas.univariate import GaussianKDE
 
-def calculate_returns(prices):
-    """Calculate returns from price series."""
-    returns = np.zeros(len(prices))
-    for i in range(1, len(prices)):
-        if prices[i - 1] == 0:
-            returns[i] = np.nan
+# 定义文件路径字典
+data_files = {
+    'BTC': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/btc.csv",
+    'DASH': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/dash.csv",
+    'ETH': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/eth.csv",
+    'LTC': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/ltc.csv",
+    'XLM': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/xlm.csv",
+    'XRP': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/xrp.csv"
+}
+
+# 定义 get_RV_BV 函数
+def get_RV_BV(data, alpha=0.05, times=True):
+    idx = 100 if times else 1
+    df = data.copy()
+
+    df['datetime'] = pd.to_datetime(df['time'])
+    df['day'] = df['datetime'].dt.date
+
+    results = []
+    for day, group in df.groupby('day'):
+        group = group.sort_values('datetime')
+
+        group['Ret'] = (np.log(group['close']) - np.log(group['close'].shift(1))) * idx
+
+        group = group.dropna(subset=['Ret'])
+        n = len(group)
+
+        if n < 5:
+            continue
+
+        # 计算 RV
+        RV = np.sum(group['Ret'] ** 2)
+
+        # 计算 BV
+        abs_ret = np.abs(group['Ret'])
+        BV = (np.pi / 2) * np.sum(abs_ret.shift(1) * abs_ret.shift(-1).dropna())
+
+        # 计算 TQ
+        TQ_coef = n * (2 ** (2 / 3) * gamma(7 / 6) / gamma(0.5)) ** (-3) * (n / (n - 4))
+
+        term1 = abs_ret.iloc[4:].values
+        term2 = abs_ret.iloc[2:-2].values
+        term3 = abs_ret.iloc[:-4].values
+
+        min_len = min(len(term1), len(term2), len(term3))
+        if min_len > 0:
+            TQ = TQ_coef * np.sum((term1[:min_len] ** (4 / 3)) *
+                                  (term2[:min_len] ** (4 / 3)) *
+                                  (term3[:min_len] ** (4 / 3)))
         else:
-            returns[i] = ((prices[i] - prices[i - 1]) / prices[i - 1])*100
-    returns[0] = 0
-    return returns
+            continue
 
-def calculate_RS(data):
-    """Calculate RS+ and RS- from returns."""
-    positive_returns = np.where(data['Ret'] > 0, data['Ret'], 0)
-    negative_returns = np.where(data['Ret'] < 0, data['Ret'], 0)
+        # Z_test
+        Z_test = ((RV - BV) / RV) / np.sqrt(((np.pi / 2) ** 2 + np.pi - 5) *
+                                            (1 / n) * max(1, TQ / (BV ** 2)))
 
-    RS_plus = np.sum(np.square(positive_returns))
-    RS_minus = np.sum(np.square(negative_returns))
+        # 计算 JV 和 C_t
+        q_alpha = norm.ppf(1 - alpha)
+        JV = (RV - BV) * (Z_test > q_alpha)
+        C_t = (Z_test <= q_alpha) * RV + (Z_test > q_alpha) * BV
 
-    return pd.Series({
-        'RS_plus': RS_plus,
-        'RS_minus': RS_minus
-    })
-
-def process_har_rs_model(data_idx_path, crypto_id):
-    """Process data for HAR-RS model for a single cryptocurrency."""
-    # Read the index data
-    df_idx = pd.read_csv(data_idx_path)
-
-    # Process index data
-    data_ret_idx = (
-        df_idx[['time', 'code', 'close']]
-        .rename(columns={'time': 'DT', 'code': 'id', 'close': 'PRICE'})
-        .dropna()
-    )
-
-    # Calculate returns for index data
-    grouped_idx = data_ret_idx.groupby('id')
-    returns_list_idx = []
-
-    for name, group in grouped_idx:
-        group_returns = pd.DataFrame({
-            'DT': group['DT'],
-            'id': group['id'],
-            'Ret': calculate_returns(group['PRICE'].values)
+        results.append({
+            'day': day,
+            'C_t': C_t,
+            'JV': JV
         })
-        returns_list_idx.append(group_returns)
 
-    data_ret_idx = pd.concat(returns_list_idx, ignore_index=True)
+    result_df = pd.DataFrame(results)
+    return result_df
 
-    # Filter for specific index
-    data_cj = data_ret_idx.query(f'id == "{crypto_id}"').copy()
+# 创建字典来存储 C_t 和 JV 数据
+c_t_dict = {}
+jv_dict = {}
 
-    # Calculate RS statistics by date
-    result = (
-        data_cj.groupby(pd.to_datetime(data_cj['DT']).dt.date)
-        .apply(calculate_RS)
-        .reset_index()
-    )
+# 遍历每个数据文件，计算 HAR-CJ
+for code, file_path in data_files.items():
+    # 读取数据
+    df = pd.read_csv(file_path)
 
-    # Rename columns for consistency
-    result = result.rename(columns={'level_0': 'DT'})
-    return result
+    # 筛选数据
+    data_filtered = df[df['code'] == code].copy()
 
-def combine_rs_data(data_files):
-    """Combine RS_plus and RS_minus for multiple cryptocurrencies."""
-    rs_plus_list = []
-    rs_minus_list = []
+    # 计算 HAR-CJ
+    har_cj = get_RV_BV(data_filtered, alpha=0.05, times=True)
 
-    for crypto_id, file_path in data_files.items():
-        # Process each cryptocurrency
-        result = process_har_rs_model(file_path, crypto_id)
-        # Convert DT to datetime for consistency
-        result['DT'] = pd.to_datetime(result['DT'])
-        # Create DataFrames for RS_plus and RS_minus
-        rs_plus = result[['DT', 'RS_plus']].rename(columns={'RS_plus': crypto_id})
-        rs_minus = result[['DT', 'RS_minus']].rename(columns={'RS_minus': crypto_id})
-        rs_plus_list.append(rs_plus)
-        rs_minus_list.append(rs_minus)
+    # 将 day 转换为字符串，以便合并时使用
+    har_cj['day'] = har_cj['day'].astype(str)
 
-    # Merge all RS_plus DataFrames on DT
-    rs_plus_combined = rs_plus_list[0]
-    for df in rs_plus_list[1:]:
-        rs_plus_combined = rs_plus_combined.merge(df, on='DT', how='outer')
+    # 存储 C_t 和 JV 数据
+    c_t_dict[code] = har_cj[['day', 'C_t']].set_index('day')['C_t']
+    jv_dict[code] = har_cj[['day', 'JV']].set_index('day')['JV']
 
-    # Merge all RS_minus DataFrames on DT
-    rs_minus_combined = rs_minus_list[0]
-    for df in rs_minus_list[1:]:
-        rs_minus_combined = rs_minus_combined.merge(df, on='DT', how='outer')
+# 转换为 DataFrame
+ct = pd.DataFrame(c_t_dict)
+jv = pd.DataFrame(jv_dict)
 
-    # Set DT as index
-    rs_plus_combined.set_index('DT', inplace=True)
-    rs_minus_combined.set_index('DT', inplace=True)
 
-    return rs_plus_combined, rs_minus_combined
+all_CT = ct.reset_index()  # Resets the 'day' index to a column
+all_CT = all_CT.rename(columns={'day': 'DT'})  # Renames the 'day' column to 'DT'
+print(all_CT)
+all_JV = jv.reset_index()  # Resets the 'day' index to a column
+all_JV = all_JV.rename(columns={'day': 'DT'})  # Renames the 'day' column to 'DT'
+print(all_JV)
 
-# Example usage
-if __name__ == "__main__":
-    data_files = {
-        'BTC': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/btc.csv",
-        'DASH': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/dash.csv",
-        'ETH': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/eth.csv",
-        'LTC': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/ltc.csv",
-        'XLM': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/xlm.csv",
-        'XRP': "c:/Users/lenovo/Desktop/spillover/crypto_5min_data/xrp.csv"
-    }
 
-    # Process all cryptocurrencies and combine results
-    rs_plus_df, rs_minus_df = combine_rs_data(data_files)
-
-    print("\nRS_plus Combined Data Sample:")
-    print(rs_plus_df.head())
-    print("\nRS_minus Combined Data Sample:")
-    print(rs_minus_df.head())
 
 # Read the data
-df_data = pd.read_csv("c:/Users/lenovo/Desktop/spillover/crypto_5min_data/BTCUSDT_5m.csv")
+df_data = pd.read_csv("c:/Users/lenovo/Desktop/spillover/crypto_5min_data/btc.csv")
 
 # Get group summary
 group_summary = df_data.groupby('code').size().reset_index(name='NumObservations')
@@ -195,25 +182,26 @@ RV = (data_filtered
 
 # Ensure RV has the correct column names
 RV.columns = ['DT', 'RV']
+# Convert DT to datetime for consistency with har_cj
 RV['DT'] = pd.to_datetime(RV['DT'])
-RV = RV.set_index('DT')['RV']  # 将 'DT' 设为索引，提取 'RV' 列
 
-rs_p_lag1 = rs_plus_df['BTC'].shift(1)
-rs_p_lag5 = rs_plus_df['BTC'].rolling(window=5).mean().shift(1)
-rs_p_lag22 = rs_plus_df['BTC'].rolling(window=22).mean().shift(1)
-rs_m_lag1 = rs_minus_df['BTC'].shift(1)
-rs_m_lag5 = rs_minus_df['BTC'].rolling(window=5).mean().shift(1)
-rs_m_lag22 = rs_minus_df['BTC'].rolling(window=22).mean().shift(1)
 
-model1= pd.DataFrame({
-    'RV': RV,
-    'rs_p_lag1': rs_p_lag1,
-    'rs_p_lag5': rs_p_lag5,
-    'rs_p_lag22': rs_p_lag22,
-    'rs_m_lag1': rs_m_lag1,
-    'rs_m_lag5': rs_m_lag5,
-    'rs_m_lag22': rs_m_lag22,
-    'BTC_lag1':rs_plus_df['ETH'].shift(1)
+JV_lag1 = all_JV['BTC'].shift(1)
+C_t_lag1 = all_CT['BTC'].shift(1)
+JV_lag5 = all_JV['BTC'].rolling(window=5).mean().shift(1)
+C_t_lag5 = all_CT['BTC'].rolling(window=5).mean().shift(1)
+JV_lag22 = all_JV['BTC'].rolling(window=22).mean().shift(1)
+C_t_lag22 = all_CT['BTC'].rolling(window=22).mean().shift(1)
+
+model1 = pd.DataFrame({
+    'RV': RV['RV'],
+    'JV_lag1': JV_lag1,
+    'C_t_lag1': C_t_lag1,
+    'JV_lag5': JV_lag5,
+    'C_t_lag5': C_t_lag5,
+    'JV_lag22': JV_lag22,
+    'C_t_lag22': C_t_lag22,
+    'BTC_lag1': all_CT['LTC'].shift(1)  # Assuming BTC_lag1 is the lagged RV
 }).dropna()
 
 '''
@@ -222,10 +210,9 @@ test_size = 300
 train_data = model1.iloc[:len(model1) - test_size]
 test_data = model1.iloc[len(model1) - test_size:]
 
-
-X_train = train_data[['rs_p_lag1', 'rs_p_lag5', 'rs_p_lag22', 'rs_m_lag1', 'rs_m_lag5', 'rs_m_lag22']]
+X_train = train_data[['JV_lag1', 'C_t_lag1', 'JV_lag5', 'C_t_lag5', 'JV_lag22', 'C_t_lag22']]
 y_train = train_data['RV']
-X_test = test_data[['rs_p_lag1', 'rs_p_lag5', 'rs_p_lag22', 'rs_m_lag1', 'rs_m_lag5', 'rs_m_lag22']]
+X_test = test_data[['JV_lag1', 'C_t_lag1', 'JV_lag5', 'C_t_lag5', 'JV_lag22', 'C_t_lag22']]
 y_test = test_data['RV']
 z_train = train_data['BTC_lag1']
 z_test = test_data['BTC_lag1']
@@ -540,38 +527,36 @@ df_predictions_tvtp = pd.DataFrame({
     'Actual_22': actuals_tvtp22
 })
 
-df_predictions_tvtp.to_csv('tvtphar-rs_corrected_DASH.csv', index=False)
-print("结果已保存到 'tvtphar-rs_corrected_DASH.csv'")
+df_predictions_tvtp.to_csv('tvtphar-cj_corrected_DASH.csv', index=False)
+print("结果已保存到 'tvtphar-cj_corrected_DASH.csv'")
 '''
-
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import statsmodels.api as sm
-from scipy.stats import norm
 from scipy.optimize import minimize
+from scipy.stats import norm
 
-# Set new parameters
-window_size = 1000
-test_size = 500
+# Define window and test sizes
+window_size = 1000  # Rolling window size
+test_size = 500     # Test set size
 
-# Data splitting
+# Split training and test data
 train_data = model1.iloc[:len(model1) - test_size]
 test_data = model1.iloc[len(model1) - test_size:]
 
-X_train = train_data[['rs_p_lag1', 'rs_p_lag5', 'rs_p_lag22', 'rs_m_lag1', 'rs_m_lag5', 'rs_m_lag22']]
+X_train = train_data[['JV_lag1', 'C_t_lag1', 'JV_lag5', 'C_t_lag5', 'JV_lag22', 'C_t_lag22']]
 y_train = train_data['RV']
-X_test = test_data[['rs_p_lag1', 'rs_p_lag5', 'rs_p_lag22', 'rs_m_lag1', 'rs_m_lag5', 'rs_m_lag22']]
+X_test = test_data[['JV_lag1', 'C_t_lag1', 'JV_lag5', 'C_t_lag5', 'JV_lag22', 'C_t_lag22']]
 y_test = test_data['RV']
 z_train = train_data['BTC_lag1']
 z_test = test_data['BTC_lag1']
 
-# Initialize rolling window with window_size
-rolling_X = X_train[-window_size:].values  # Take last window_size rows
-rolling_y = y_train[-window_size:].values
-rolling_z = z_train[-window_size:].values
+rolling_X = X_train.values
+rolling_y = y_train.values
+rolling_z = z_train.values
 
-# Initialize lists for predictions and actuals
+# Initialize prediction and actual lists
 predictions_tvtp1 = []
 actuals_tvtp1 = []
 predictions_tvtp5 = []
@@ -579,14 +564,14 @@ actuals_tvtp5 = []
 predictions_tvtp22 = []
 actuals_tvtp22 = []
 
-# Model parameters
+# Initialize model parameters
 k_features = X_train.shape[1]
-k = k_features + 1  # Including intercept
+k = k_features + 1
 n_states = 2
 n_params = k * n_states + n_states + 2 * n_states
 initial_params = np.zeros(n_params)
 
-# Initialize parameters using OLS
+# OLS initialization
 ols_model = sm.OLS(rolling_y, np.column_stack([np.ones(len(rolling_y)), rolling_X])).fit()
 for s in range(n_states):
     factor = 0.6 + 0.8 * s
@@ -600,10 +585,9 @@ for s in range(n_states):
 initial_params[k * n_states + n_states:k * n_states + 2 * n_states] = [0.8, 0.8]
 initial_params[k * n_states + 2 * n_states:] = [-0.1, 0.1]
 
-# Initialize last_filtered_probs_normalized
+# Initialize filtered probabilities
 last_filtered_probs_normalized = np.ones(n_states) / n_states
 
-# Define tvtp_ms_har_log_likelihood function (unchanged)
 def tvtp_ms_har_log_likelihood(params, y, X_with_const, z, n_states=2, return_filtered_probs=False):
     n = len(y)
     k_with_const = X_with_const.shape[1]
@@ -663,7 +647,6 @@ def tvtp_ms_har_log_likelihood(params, y, X_with_const, z, n_states=2, return_fi
         return -log_lik, log_filtered_prob
     return -log_lik
 
-# Define fit_tvtp_ms_har function (unchanged)
 def fit_tvtp_ms_har(y, X_with_const, z, n_states=2, initial_params=None):
     k_with_const = X_with_const.shape[1]
     if initial_params is None:
@@ -710,7 +693,6 @@ def fit_tvtp_ms_har(y, X_with_const, z, n_states=2, initial_params=None):
 
     return result, final_log_filtered_probs
 
-# Define predict_tvtp_corrected function (unchanged)
 def predict_tvtp_corrected(X_pred_features, z_for_P_matrix, last_filt_probs_norm, beta_est, a_est, b_est, n_states_pred=2):
     X_pred_with_const = np.column_stack([np.ones(len(X_pred_features)), X_pred_features])
     mu = np.dot(X_pred_with_const, beta_est.T)
@@ -741,12 +723,17 @@ def predict_tvtp_corrected(X_pred_features, z_for_P_matrix, last_filt_probs_norm
     pred = np.sum(pred_state_probs * mu[0])
     return pred
 
-# Rolling window predictions
 print("开始滚动窗口预测...")
 for i in tqdm(range(len(X_test))):
-    X_train_vals = rolling_X[-window_size:]  # Ensure window_size
-    y_train_vals = rolling_y[-window_size:]
-    z_train_vals = rolling_z[-window_size:]
+    # Ensure rolling window size does not exceed window_size
+    if len(rolling_X) > window_size:
+        rolling_X = rolling_X[-window_size:]
+        rolling_y = rolling_y[-window_size:]
+        rolling_z = rolling_z[-window_size:]
+
+    X_train_vals = rolling_X
+    y_train_vals = rolling_y
+    z_train_vals = rolling_z
 
     X_train_with_const = np.column_stack([np.ones(len(X_train_vals)), X_train_vals])
 
@@ -756,15 +743,12 @@ for i in tqdm(range(len(X_test))):
         )
         if tvtp_fit_result.success:
             print(f"时间窗 {i}: 模型拟合成功。")
-            fit_successful_this_iteration = True
-        else:
-            print(f"时间窗 {i}: 模型拟合失败。原因: {tvtp_fit_result.message}")
-            fit_successful_this_iteration = False
-        if tvtp_fit_result.success and final_log_filtered_probs_train is not None:
             initial_params = tvtp_fit_result.x
             last_log_probs = final_log_filtered_probs_train[-1, :]
             exp_last_log_probs = np.exp(last_log_probs - np.max(last_log_probs))
             last_filtered_probs_normalized = exp_last_log_probs / np.sum(exp_last_log_probs)
+        else:
+            print(f"时间窗 {i}: 模型拟合失败。原因: {tvtp_fit_result.message}")
 
         k_with_const = X_train_with_const.shape[1]
         beta_tvtp = initial_params[:k_with_const * n_states].reshape(n_states, k_with_const)
@@ -775,13 +759,7 @@ for i in tqdm(range(len(X_test))):
         current_X_test_features = X_test.iloc[i:i + 1].values
         z_for_P_matrix = z_test.iloc[i - 1] if i > 0 else (z_train_vals[-1] if len(z_train_vals) > 0 else 0.0)
         pred_1 = predict_tvtp_corrected(
-            current_X_test_features,
-            z_for_P_matrix,
-            last_filtered_probs_normalized,
-            beta_tvtp,
-            a_params,
-            b_params,
-            n_states
+            current_X_test_features, z_for_P_matrix, last_filtered_probs_normalized, beta_tvtp, a_params, b_params, n_states
         )
         predictions_tvtp1.append(float(pred_1))
         actuals_tvtp1.append(float(y_test.iloc[i]))
@@ -793,13 +771,7 @@ for i in tqdm(range(len(X_test))):
             future_X_test_5_features = X_test.iloc[i + 4:i + 5].values
             z_for_P_matrix_5 = z_test.iloc[i + 3] if i + 3 < len(z_test) else (z_test.iloc[-1] if len(z_test) > 0 else 0.0)
             pred_5 = predict_tvtp_corrected(
-                future_X_test_5_features,
-                z_for_P_matrix_5,
-                last_filtered_probs_normalized,
-                beta_tvtp,
-                a_params,
-                b_params,
-                n_states
+                future_X_test_5_features, z_for_P_matrix_5, last_filtered_probs_normalized, beta_tvtp, a_params, b_params, n_states
             )
             predictions_tvtp5.append(float(pred_5))
             actuals_tvtp5.append(float(y_test.iloc[i + 4]))
@@ -812,19 +784,21 @@ for i in tqdm(range(len(X_test))):
             future_X_test_22_features = X_test.iloc[i + 21:i + 22].values
             z_for_P_matrix_22 = z_test.iloc[i + 20] if i + 20 < len(z_test) else (z_test.iloc[-1] if len(z_test) > 0 else 0.0)
             pred_22 = predict_tvtp_corrected(
-                future_X_test_22_features,
-                z_for_P_matrix_22,
-                last_filtered_probs_normalized,
-                beta_tvtp,
-                a_params,
-                b_params,
-                n_states
+                future_X_test_22_features, z_for_P_matrix_22, last_filtered_probs_normalized, beta_tvtp, a_params, b_params, n_states
             )
             predictions_tvtp22.append(float(pred_22))
             actuals_tvtp22.append(float(y_test.iloc[i + 21]))
         else:
             predictions_tvtp22.append(None)
             actuals_tvtp22.append(None)
+
+        # Update rolling window
+        new_X = X_test.iloc[i:i + 1].values
+        rolling_X = np.vstack((rolling_X, new_X))
+        rolling_y = np.append(rolling_y, y_test.iloc[i
+
+])
+        rolling_z = np.append(rolling_z, z_test.iloc[i])
 
     except Exception as e:
         print(f"迭代 {i} 出现错误: {str(e)}")
@@ -835,11 +809,11 @@ for i in tqdm(range(len(X_test))):
         predictions_tvtp22.append(predictions_tvtp22[-1] if predictions_tvtp22 and predictions_tvtp22[-1] is not None else np.nan)
         actuals_tvtp22.append(float(y_test.iloc[i + 21]) if i + 21 < len(y_test) else np.nan)
 
-    # Update rolling window to maintain window_size
-    new_X = X_test.iloc[i:i + 1].values
-    rolling_X = np.vstack((rolling_X[1:], new_X))
-    rolling_y = np.append(rolling_y[1:], y_test.iloc[i])
-    rolling_z = np.append(rolling_z[1:], z_test.iloc[i])
+        # Update rolling window even in case of error
+        new_X = X_test.iloc[i:i + 1].values
+        rolling_X = np.vstack((rolling_X, new_X))
+        rolling_y = np.append(rolling_y, y_test.iloc[i])
+        rolling_z = np.append(rolling_z, z_test.iloc[i])
 
 print("预测完成!")
 
@@ -853,5 +827,5 @@ df_predictions_tvtp = pd.DataFrame({
     'Actual_22': actuals_tvtp22
 })
 
-df_predictions_tvtp.to_csv('tvtphar-rs_corrected_DASH_window1000_test500.csv', index=False)
-print("结果已保存到 'tvtphar-rs_corrected_DASH_window1000_test500.csv'")
+df_predictions_tvtp.to_csv('tvtphar-cj_window.csv', index=False)
+print("结果已保存到 'tvtphar-cj_window.csv'")
